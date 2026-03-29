@@ -1,0 +1,241 @@
+### Write a D-FF code and perform verification in SV
+
+DUT:
+
+// Code your design here
+module dff(dff_if vif);
+  always_ff @(posedge vif.clk) begin
+    if(vif.rst)
+      vif.dout<=0;
+    else
+      vif.dout<=vif.din;
+  end
+endmodule 
+
+
+interface dff_if;
+  bit clk;
+  bit rst;
+  logic din;
+  logic dout;
+endinterface
+
+
+Testbench:
+The provided text is Verilog/SystemVerilog code, which defines a Universal Verification Methodology (UVM)-like environment for verifying a Design Under Test (DUT), likely a D-Flip Flop (DFF). Rewriting code for "formality" is unusual, as code is typically judged on correctness, readability, and adherence to coding standards.
+
+Assuming the user wants the comments and basic structure to be presented in a more professional or academic style, here is the original code block with slightly refined comments and terminology, maintaining the technical structure of the Verilog/SystemVerilog code.
+class transaction;
+
+  rand bit din;    // Random input data bit 'din'
+  bit dout;        // Output data bit 'dout'
+
+  function transaction copy();
+    copy = new();   // Allocate memory for a new transaction object
+    copy.din = this.din;  // Copy the input value from the current object
+    copy.dout = this.dout;  // Copy the output value from the current object
+  endfunction
+
+  function void display(input string tag);
+    $display("\[%0s\] : DIN : %0b DOUT : %0b", tag, din, dout); // Display transaction details
+  endfunction
+
+endclass
+
+//////////////////////////////////////////////////
+
+class generator;
+  transaction tr;  // Handle for a transaction object
+  mailbox #(transaction) mbx;      // Mailbox for sending transactions to the driver
+  mailbox #(transaction) mbxref;   // Mailbox for sending reference transactions (golden data) to the scoreboard
+  event sconext; // Event to synchronize with the scoreboard's completion of a check
+  event done;    // Event to signal the completion of stimulus generation
+  int count;     // Total number of stimuli to be generated
+
+  function new(mailbox #(transaction) mbx, mailbox #(transaction) mbxref);
+    this.mbx = mbx;  // Initialize the driver mailbox handle
+    this.mbxref = mbxref; // Initialize the scoreboard reference mailbox handle
+    tr = new(); // Instantiate a new transaction object
+  endfunction
+
+// The purpose of the run method is to randomize data and transmit it to the driver and scoreboard.
+  task run();
+    repeat(count) begin
+      assert(tr.randomize) else $error("\[GEN\] : RANDOMIZATION FAILED");
+      mbx.put(tr.copy); // Place a copy of the randomized transaction into the driver mailbox
+      mbxref.put(tr.copy); // Place a copy of the transaction into the scoreboard reference mailbox
+      tr.display("GEN"); // Log the generated transaction
+      @(sconext); // Wait for the scoreboard to complete the current comparison
+    end
+    ->done; // Trigger the "done" event upon completion of all stimuli
+  endtask
+
+endclass
+
+//////////////////////////////////////////////////////////
+
+class driver;
+  transaction tr; // Handle for the received transaction object
+  mailbox #(transaction) mbx; // Mailbox for receiving transactions from the generator
+  virtual dff_if vif; // Virtual interface handle connected to the DUT
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx; // Initialize the mailbox handle
+  endfunction
+
+  task reset();
+    vif.rst <= 1'b1; // Assert the reset signal
+    repeat(5) @(posedge vif.clk); // Wait for 5 clock cycles
+    vif.rst <= 1'b0; // Deassert the reset signal
+    @(posedge vif.clk); // Wait for an additional clock cycle
+    $display("\[DRV\] : RESET DONE"); // Log reset completion
+  endtask
+
+  task run();
+    forever begin
+      mbx.get(tr); // Retrieve a transaction from the generator
+      vif.din <= tr.din; // Drive the DUT input based on the transaction data
+      @(posedge vif.clk); // Wait for the rising edge of the clock (data setup)
+      tr.display("DRV"); // Log the transaction being driven
+      vif.din <= 1'b0; // Deassert the data input (or set to a default value)
+      @(posedge vif.clk); // Wait for the next rising edge of the clock
+    end
+  endtask
+
+endclass
+
+//////////////////////////////////////////////////////
+
+class monitor;
+  transaction tr; // Handle for the captured transaction object
+  mailbox #(transaction) mbx; // Mailbox for sending captured data to the scoreboard
+  virtual dff_if vif; // Virtual interface handle connected to the DUT
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx; // Initialize the scoreboard mailbox handle
+  endfunction
+
+  task run();
+    tr = new(); // Instantiate a new transaction object
+    forever begin
+      repeat(2) @(posedge vif.clk); // Wait for two rising clock edges (to capture output)
+      tr.dout = vif.dout; // Sample the DUT output
+      mbx.put(tr); // Transmit the captured transaction to the scoreboard
+      tr.display("MON"); // Log the monitored transaction
+    end
+  endtask
+
+endclass
+
+////////////////////////////////////////////////////
+
+class scoreboard;
+  transaction tr; // Transaction handle for data from the monitor (actual result)
+  transaction trref; // Transaction handle for reference data from the generator (expected result)
+  mailbox #(transaction) mbx; // Mailbox for receiving transactions from the monitor
+  mailbox #(transaction) mbxref; // Mailbox for receiving reference data from the generator
+  event sconext; // Event to signal completion of the current comparison
+
+  function new(mailbox #(transaction) mbx, mailbox #(transaction) mbxref);
+    this.mbx = mbx; // Initialize the monitor mailbox handle
+    this.mbxref = mbxref; // Initialize the reference mailbox handle
+  endfunction
+
+  task run();
+    forever begin
+      mbx.get(tr); // Retrieve the actual result transaction from the monitor
+      mbxref.get(trref); // Retrieve the reference transaction from the generator
+      tr.display("SCO"); // Log the actual result
+      trref.display("REF"); // Log the expected result
+      if (tr.dout == trref.din)
+        $display("\[SCO\] : DATA MATCHED"); // Comparison successful
+      else
+        $display("\[SCO\] : DATA MISMATCHED"); // Comparison failed
+      $display("-------------------------------------------------");
+      ->sconext; // Signal the generator that the comparison is complete
+    end
+  endtask
+
+endclass
+
+////////////////////////////////////////////////////////
+
+class environment;
+  generator gen; // Generator instance
+  driver drv; // Driver instance
+  monitor mon; // Monitor instance
+  scoreboard sco; // Scoreboard instance
+  event next; // Synchronization event between the generator and scoreboard
+
+  mailbox #(transaction) gdmbx; // Mailbox for Generator-Driver communication
+  mailbox #(transaction) msmbx; // Mailbox for Monitor-Scoreboard communication
+  mailbox #(transaction) mbxref; // Mailbox for Generator-Scoreboard reference data
+
+  virtual dff_if vif; // Virtual interface handle for the DUT
+
+  function new(virtual dff_if vif);
+    gdmbx = new(); // Instantiate the generator-driver mailbox
+    mbxref = new(); // Instantiate the generator-scoreboard reference mailbox
+    gen = new(gdmbx, mbxref); // Construct the generator
+    drv = new(gdmbx); // Construct the driver
+    msmbx = new(); // Instantiate the monitor-scoreboard mailbox
+    mon = new(msmbx); // Construct the monitor
+    sco = new(msmbx, mbxref); // Construct the scoreboard
+    this.vif = vif; // Store the virtual interface handle
+    drv.vif = this.vif; // Connect the virtual interface to the driver
+    mon.vif = this.vif; // Connect the virtual interface to the monitor
+    gen.sconext = next; // Establish synchronization event for generator
+    sco.sconext = next; // Establish synchronization event for scoreboard
+  endfunction
+
+  task pre_test();
+    drv.reset(); // Execute the pre-test reset sequence
+  endtask
+
+  task test();
+    fork // Initiate parallel execution of the components
+      gen.run(); // Start the stimulus generator
+      drv.run(); // Start the driver
+      mon.run(); // Start the monitor
+      sco.run(); // Start the scoreboard
+    join_any // Wait for any of the tasks to complete (specifically, 'gen.run' will signal the end)
+  endtask
+
+  task post_test();
+    wait(gen.done.triggered); // Wait for the generator's 'done' event to be triggered
+    $finish(); // Terminate the simulation
+  endtask
+
+  task run();
+    pre_test(); // Execute pre-test setup
+    test(); // Execute the main test scenario
+    post_test(); // Execute post-test cleanup and termination
+  endtask
+endclass
+
+/////////////////////////////////////////////////////
+
+module tb;
+  dff_if vif(); // Instantiate the DUT interface
+
+  dff dut(vif); // Instantiate the Design Under Test (DUT)
+
+  initial begin
+    vif.clk <= 0; // Initialize the clock signal
+  end
+
+  always #10 vif.clk <= ~vif.clk; // Define the clock signal with a 20 time-unit period
+
+  environment env; // Handle for the test environment instance
+
+  initial begin
+    env = new(vif); // Instantiate the environment, connecting it to the DUT interface
+    env.gen.count = 30; // Configure the generator to produce 30 stimuli
+    env.run(); // Start the execution of the test environment
+  end
+
+  initial begin
+    $dumpfile("dump.vcd"); // Specify the Value Change Dump (VCD) file name
+    $dumpvars; // Dump all variables for waveform viewing
+  end
+endmodule
