@@ -1,0 +1,79 @@
+//============================================================
+//  Synchronous FIFO Design (SystemVerilog)
+//============================================================
+//  Features:
+//  - Parameterized FIFO depth
+//  - Circular buffer using read/write pointers
+//  - Full and Empty flag generation
+//  - Supports simultaneous read and write
+//============================================================
+
+module sync_FIFO #(
+    parameter FIFO_Depth = 16,
+    parameter N = $clog2(FIFO_Depth)
+)(
+    input  logic        clk,       // Clock
+    input  logic        rst,       // Active-high reset
+    input  logic        wdata,     // Write enable
+    input  logic        rdata,     // Read enable
+    input  logic [7:0]  din,       // Data input
+    output logic [7:0]  dout,      // Data output
+    output logic        full,      // FIFO full flag
+    output logic        empty      // FIFO empty flag
+);
+
+    //========================================================
+    // Internal Signals
+    //========================================================
+    logic [N:0] wptr, rptr;                     // Write & Read pointers
+    logic [7:0] mem [0:FIFO_Depth-1];           // FIFO memory
+
+    //========================================================
+    // FIFO Operation
+    //========================================================
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            wptr <= '0;
+            rptr <= '0;
+            dout <= '0;
+        end
+        else begin
+            // Write Operation
+            if (wdata && !full) begin
+                mem[wptr[N-1:0]] <= din;
+                wptr <= wptr + 1'b1;
+            end
+
+            // Read Operation
+            if (rdata && !empty) begin
+                dout <= mem[rptr[N-1:0]];
+                rptr <= rptr + 1'b1;
+            end
+        end
+    end
+
+    //========================================================
+    // Status Flags
+    //========================================================
+    assign empty = (wptr == rptr);
+
+    assign full  = ({~wptr[N], wptr[N-1:0]} == rptr);
+
+endmodule
+
+
+//============================================================
+//  FIFO Interface Definition
+//============================================================
+interface fifo_if;
+
+    logic clk;        // Clock
+    logic rst;        // Reset
+    logic wdata;      // Write enable
+    logic rdata;      // Read enable
+    logic [7:0] din;  // Input data
+    logic [7:0] dout; // Output data
+    logic full;       // Full flag
+    logic empty;      // Empty flag
+
+endinterface
