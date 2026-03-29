@@ -1,0 +1,309 @@
+//============================================================
+//  FIFO Testbench (SystemVerilog)
+//============================================================
+//  Components:
+//  - Transaction
+//  - Generator
+//  - Driver
+//  - Monitor
+//  - Scoreboard
+//  - Environment
+//  - Top Testbench
+//============================================================
+
+
+////////////////////////////////////////////
+// Transaction
+////////////////////////////////////////////
+class transaction;
+
+  rand bit oper;               // 1 = write, 0 = read
+  bit wdata, rdata;
+  bit [7:0] din;
+  bit [7:0] dout;
+  bit full, empty;
+
+  // Equal probability for read/write
+  constraint oper_ctrl { oper dist {1 := 50, 0 := 50}; }
+
+endclass
+
+
+////////////////////////////////////////////
+// Generator
+////////////////////////////////////////////
+class generator;
+
+  transaction tr;
+  mailbox #(transaction) mbx;
+
+  int count = 0;
+  int i = 0;
+
+  event next;
+  event done;
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx;
+    tr = new();
+  endfunction
+
+  task run();
+    repeat (count) begin
+      assert(tr.randomize());
+      i++;
+      mbx.put(tr);
+
+      $display("[GEN] Operation=%0d | Iteration=%0d", tr.oper, i);
+      @(next);
+    end
+    -> done;
+  endtask
+
+endclass
+
+
+////////////////////////////////////////////
+// Driver
+////////////////////////////////////////////
+class driver;
+
+  virtual fifo_if fif;
+  mailbox #(transaction) mbx;
+  transaction tr;
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx;
+  endfunction
+
+  // Reset DUT
+  task reset();
+    fif.rst   <= 1;
+    fif.wdata <= 0;
+    fif.rdata <= 0;
+    fif.din   <= 0;
+
+    repeat (5) @(posedge fif.clk);
+    fif.rst <= 0;
+
+    $display("[DRV] Reset Completed");
+    $display("--------------------------------------------------");
+  endtask
+
+  // Write operation
+  task write();
+    @(posedge fif.clk);
+    fif.wdata <= 1;
+    fif.rdata <= 0;
+    fif.din   <= $urandom_range(1, 100);
+
+    @(posedge fif.clk);
+    fif.wdata <= 0;
+
+    $display("[DRV] WRITE -> Data: %0d", fif.din);
+  endtask
+
+  // Read operation
+  task read();
+    @(posedge fif.clk);
+    fif.rdata <= 1;
+    fif.wdata <= 0;
+
+    @(posedge fif.clk);
+    fif.rdata <= 0;
+
+    $display("[DRV] READ");
+  endtask
+
+  // Run driver
+  task run();
+    forever begin
+      mbx.get(tr);
+      if (tr.oper)
+        write();
+      else
+        read();
+    end
+  endtask
+
+endclass
+
+
+////////////////////////////////////////////
+// Monitor
+////////////////////////////////////////////
+class monitor;
+
+  virtual fifo_if fif;
+  mailbox #(transaction) mbx;
+  transaction tr;
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx;
+  endfunction
+
+  task run();
+    forever begin
+      tr = new();
+
+      @(posedge fif.clk);
+      tr.wdata = fif.wdata;
+      tr.rdata = fif.rdata;
+      tr.din   = fif.din;
+      tr.full  = fif.full;
+      tr.empty = fif.empty;
+
+      @(posedge fif.clk);
+      tr.dout  = fif.dout;
+
+      mbx.put(tr);
+
+      $display("[MON] WR=%0d RD=%0d DIN=%0d DOUT=%0d FULL=%0d EMPTY=%0d",
+                tr.wdata, tr.rdata, tr.din, tr.dout, tr.full, tr.empty);
+    end
+  endtask
+
+endclass
+
+
+////////////////////////////////////////////
+// Scoreboard
+////////////////////////////////////////////
+class scoreboard;
+
+  mailbox #(transaction) mbx;
+  transaction tr;
+
+  event next;
+
+  bit [7:0] fifo_queue[$];
+  bit [7:0] expected;
+  int err = 0;
+
+  function new(mailbox #(transaction) mbx);
+    this.mbx = mbx;
+  endfunction
+
+  task run();
+    forever begin
+      mbx.get(tr);
+
+      // Write tracking
+      if (tr.wdata && !tr.full) begin
+        fifo_queue.push_front(tr.din);
+        $display("[SCO] Stored: %0d", tr.din);
+      end
+
+      // Read checking
+      if (tr.rdata && !tr.empty) begin
+        expected = fifo_queue.pop_back();
+
+        if (tr.dout === expected)
+          $display("[SCO] PASS: %0d", tr.dout);
+        else begin
+          $error("[SCO] FAIL: Expected=%0d Got=%0d", expected, tr.dout);
+          err++;
+        end
+      end
+
+      -> next;
+    end
+  endtask
+
+endclass
+
+
+////////////////////////////////////////////
+// Environment
+////////////////////////////////////////////
+class environment;
+
+  generator  gen;
+  driver     drv;
+  monitor    mon;
+  scoreboard sco;
+
+  mailbox #(transaction) gdmbx;
+  mailbox #(transaction) msmbx;
+
+  event nextgs;
+  virtual fifo_if fif;
+
+  function new(virtual fifo_if fif);
+    this.fif = fif;
+
+    gdmbx = new();
+    msmbx = new();
+
+    gen = new(gdmbx);
+    drv = new(gdmbx);
+    mon = new(msmbx);
+    sco = new(msmbx);
+
+    drv.fif = fif;
+    mon.fif = fif;
+
+    gen.next = nextgs;
+    sco.next = nextgs;
+  endfunction
+
+  task run();
+    drv.reset();
+
+    fork
+      gen.run();
+      drv.run();
+      mon.run();
+      sco.run();
+    join_any
+
+    wait(gen.done.triggered);
+
+    $display("--------------------------------------------------");
+    $display("Final Error Count = %0d", sco.err);
+    $display("--------------------------------------------------");
+
+    $finish();
+  endtask
+
+endclass
+
+
+////////////////////////////////////////////
+// Top Testbench
+////////////////////////////////////////////
+module tb;
+
+  fifo_if fif();
+
+  // DUT Instantiation
+  sync_FIFO dut (
+    .clk   (fif.clk),
+    .rst   (fif.rst),
+    .wdata (fif.wdata),
+    .rdata (fif.rdata),
+    .din   (fif.din),
+    .dout  (fif.dout),
+    .full  (fif.full),
+    .empty (fif.empty)
+  );
+
+  // Clock Generation
+  initial fif.clk = 0;
+  always #10 fif.clk = ~fif.clk;
+
+  environment env;
+
+  initial begin
+    env = new(fif);
+    env.gen.count = 20;
+    env.run();
+  end
+
+  // Waveform dump
+  initial begin
+    $dumpfile("fifo.vcd");
+    $dumpvars;
+  end
+
+endmodule
